@@ -57,6 +57,15 @@ input int      InpMagic         = 777999;       // Magic number
 input bool     InpEnableLog     = true;         // Detailed logging
 input int      InpSlippage      = 20;           // Allowed slippage (points)
 
+input group "=== SCALP MODE ==="
+input bool     InpScalpMode     = true;         // Enable scalp mode (fixed $$ target)
+input double   InpScalpLots     = 0.01;         // Fixed lot size
+input double   InpScalpTarget   = 1.00;         // Profit target ($)
+input double   InpScalpStop     = 0.50;         // Stop loss ($)
+input bool     InpScalpTrendFilter = true;      // Only trade with EMA-50 major trend
+input int      InpScalpCooldown = 3;            // Bars to skip after a loss
+input int      InpEmaTrend      = 50;           // Trend filter EMA period
+
 //==========================================================================
 //  GLOBALS
 //==========================================================================
@@ -66,7 +75,7 @@ CPositionInfo pos;
 string        sym;
 
 // Indicator handles
-int  hEmaFast, hEmaSlow, hRsi, hAtr, hMacd, hBb;
+int  hEmaFast, hEmaSlow, hRsi, hAtr, hMacd, hBb, hEmaTrend;
 
 // State
 bool   inPosition      = false;
@@ -80,6 +89,10 @@ double totalPnl        = 0.0;
 // Previous bar values for dual-mode signal tracking
 double prevEmaFast = 0, prevEmaSlow = 0, prevMacdHist = 0, prevRsi = 0;
 bool   prevReady = false;
+
+// Scalp mode state
+int    scalpCooldownBars = 0;    // remaining cooldown bars after a loss
+string lastTradeResult   = "";   // "WIN" or "LOSS"
 
 //==========================================================================
 //  INIT / DEINIT
@@ -106,14 +119,16 @@ int OnInit()
     // Create indicator handles
     hEmaFast = iMA(sym, InpTF, InpEmaFast, 0, MODE_EMA, PRICE_CLOSE);
     hEmaSlow = iMA(sym, InpTF, InpEmaSlow, 0, MODE_EMA, PRICE_CLOSE);
+    hEmaTrend= iMA(sym, InpTF, InpEmaTrend,0, MODE_EMA, PRICE_CLOSE);
     hRsi     = iRSI(sym, InpTF, InpRsiPeriod, PRICE_CLOSE);
     hAtr     = iATR(sym, InpTF, InpAtrPeriod);
     hMacd    = iMACD(sym, InpTF, InpMacdFast, InpMacdSlow, InpMacdSignal, PRICE_CLOSE);
     hBb      = iBands(sym, InpTF, InpBbPeriod, 0, InpBbMult, PRICE_CLOSE);
 
     if(hEmaFast == INVALID_HANDLE || hEmaSlow == INVALID_HANDLE ||
-       hRsi == INVALID_HANDLE     || hAtr == INVALID_HANDLE     ||
-       hMacd == INVALID_HANDLE    || hBb == INVALID_HANDLE)
+       hEmaTrend== INVALID_HANDLE || hRsi == INVALID_HANDLE     ||
+       hAtr == INVALID_HANDLE    || hMacd == INVALID_HANDLE     ||
+       hBb == INVALID_HANDLE)
     {
         Print("ERROR: Failed to create indicator handles");
         return INIT_FAILED;
@@ -292,12 +307,13 @@ double GetBuffer(int handle, int bufIdx, int shift = 1)
     return buf[0];
 }
 
-bool ReadIndicators(double &emaFast, double &emaSlow, double &rsi,
+bool ReadIndicators(double &emaFast, double &emaSlow, double &emaTrend, double &rsi,
                     double &atr,     double &macdHist,
                     double &bbUpper, double &bbMid, double &bbLower)
 {
     emaFast  = GetBuffer(hEmaFast, 0);
     emaSlow  = GetBuffer(hEmaSlow, 0);
+    emaTrend = GetBuffer(hEmaTrend, 0);
     rsi      = GetBuffer(hRsi,     0);
     atr      = GetBuffer(hAtr,     0);
     macdHist = GetBuffer(hMacd,    2);  // Histogram buffer = index 2
@@ -305,7 +321,7 @@ bool ReadIndicators(double &emaFast, double &emaSlow, double &rsi,
     bbMid    = GetBuffer(hBb,      0);
     bbLower  = GetBuffer(hBb,      2);
 
-    return (emaFast > 0 && emaSlow > 0 && rsi > 0 && atr > 0 &&
+    return (emaFast > 0 && emaSlow > 0 && emaTrend > 0 && rsi > 0 && atr > 0 &&
             bbUpper > 0 && bbMid > 0);
 }
 
@@ -315,10 +331,10 @@ bool ReadIndicators(double &emaFast, double &emaSlow, double &rsi,
 
 void AnalyseAndTrade()
 {
-    double emaFast, emaSlow, rsi, atr, macdHist;
+    double emaFast, emaSlow, emaTrend, rsi, atr, macdHist;
     double bbUpper, bbMid, bbLower;
 
-    if(!ReadIndicators(emaFast, emaSlow, rsi, atr, macdHist,
+    if(!ReadIndicators(emaFast, emaSlow, emaTrend, rsi, atr, macdHist,
                        bbUpper, bbMid, bbLower))
     {
         if(InpEnableLog) Print("Waiting for indicators to warm up...");
@@ -358,9 +374,20 @@ void AnalyseAndTrade()
     bool emaBullish  = (emaFast > emaSlow);
     bool emaBearish  = (emaFast < emaSlow);
 
+    // ────── SCALP MODE GUARDS ──────────────────────────────────────────
+    if(InpScalpMode)
+    {
+        if(scalpCooldownBars > 0)
+        {
+            scalpCooldownBars--;
+            if(InpEnableLog) Print("Scalp cooldown active: ", scalpCooldownBars, " bars left");
+            return;
+        }
+    }
+
     // ────── MACD momentum ──────────────────────────────────────────────
-    bool macdBull = (macdHist > 0 && (!prevValuesReady || macdHist > prevMacdHist));
-    bool macdBear = (macdHist < 0 && (!prevValuesReady || macdHist < prevMacdHist));
+    bool macdBull = (macdHist > 0 && (!prevReady || macdHist > prevMacdHist));
+    bool macdBear = (macdHist < 0 && (!prevReady || macdHist < prevMacdHist));
 
     // ────── SIGNAL LOGIC ───────────────────────────────────────────────
     bool buySignal  = false;
@@ -401,6 +428,14 @@ void AnalyseAndTrade()
         }
     }
 
+    // ── SCALP MODE TREND FILTER ───────────────────────────────────────
+    if(InpScalpMode && InpScalpTrendFilter)
+    {
+        double close = iClose(sym, InpTF, 0);
+        if(buySignal  && close < emaTrend) { buySignal  = false; if(InpEnableLog) Print("Scalp BUY blocked by EMA-50 trend"); }
+        if(sellSignal && close > emaTrend) { sellSignal = false; if(InpEnableLog) Print("Scalp SELL blocked by EMA-50 trend"); }
+    }
+
     // Store prev values
     prevEmaFast  = emaFast;
     prevEmaSlow  = emaSlow;
@@ -431,15 +466,39 @@ void OpenTrade(ENUM_ORDER_TYPE orderType, double atr, string reason)
     double pipSize  = SymbolInfoDouble(sym, SYMBOL_POINT) * 10; // 1 pip
     if(pipSize == 0) pipSize = 0.0001;
 
-    double slDist   = atr * InpSlAtrMult;
-    double tpDist   = atr * InpTpAtrMult;
+    double slDist, tpDist, lots;
 
-    // Risk-based lot sizing
-    double riskAmt  = balance * InpRiskPct / 100.0;
-    double slPips   = slDist / pipSize;
-    double pipVal   = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE) /
-                      SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE) * pipSize;
-    double lots     = (pipVal > 0 && slPips > 0) ? (riskAmt / (slPips * pipVal)) : 0.01;
+    if(InpScalpMode)
+    {
+        lots = InpScalpLots;
+        // Calculate price distance for fixed dollar profit/stop
+        // Profit = (PriceDiff / TickSize) * TickValue * Lots
+        double tickSize  = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+        double tickValue = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
+        
+        if(tickValue > 0 && lots > 0)
+        {
+            tpDist = (InpScalpTarget * tickSize) / (tickValue * lots);
+            slDist = (InpScalpStop   * tickSize) / (tickValue * lots);
+        }
+        else
+        {
+            slDist = atr * InpSlAtrMult;
+            tpDist = atr * InpTpAtrMult;
+        }
+    }
+    else
+    {
+        slDist = atr * InpSlAtrMult;
+        tpDist = atr * InpTpAtrMult;
+
+        // Risk-based lot sizing
+        double riskAmt  = balance * InpRiskPct / 100.0;
+        double slPips   = slDist / pipSize;
+        double pipVal   = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE) /
+                          SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE) * pipSize;
+        lots = (pipVal > 0 && slPips > 0) ? (riskAmt / (slPips * pipVal)) : 0.01;
+    }
 
     // Clamp to symbol limits
     double minLot  = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
@@ -490,7 +549,8 @@ void OpenTrade(ENUM_ORDER_TYPE orderType, double atr, string reason)
         Print("  Lots   : ", lots);
         Print("  Risk   : $", NormalizeDouble(riskAmt, 2));
         Print("  Reason : ", reason);
-        Print("  RR     : 1:", NormalizeDouble(InpTpAtrMult/InpSlAtrMult, 2));
+        Print("  Mode   : ", InpScalpMode ? "SCALP" : "NORMAL");
+        if(!InpScalpMode) Print("  RR     : 1:", NormalizeDouble(InpTpAtrMult/InpSlAtrMult, 2));
     }
     else
     {
@@ -531,9 +591,19 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
     if(deal.Entry() == DEAL_ENTRY_OUT || deal.Entry() == DEAL_ENTRY_OUT_BY)
     {
         totalPnl += pnl;
-        if(pnl < 0) dailyLoss += MathAbs(pnl);
+        if(pnl < 0) 
+        {
+            dailyLoss += MathAbs(pnl);
+            lastTradeResult = "LOSS";
+            if(InpScalpMode) scalpCooldownBars = InpScalpCooldown;
+        }
+        else
+        {
+            lastTradeResult = "WIN";
+        }
 
         Print("── POSITION CLOSED ──  P&L: $", NormalizeDouble(pnl, 2),
+              "  | Result: ", lastTradeResult, 
               "  | Total P&L: $", NormalizeDouble(totalPnl, 2));
     }
 }

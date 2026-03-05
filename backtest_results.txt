@@ -1,0 +1,39 @@
+
+=================================================================
+  FOREX SCALPING BOT — TICK BACKTESTER  v2.0
+=================================================================
+  File      : Exness_BTCUSD_Zero_Spread_2025_11_09.csv
+  TF        : 5m  |  Balance: $100.00
+  Mode      : SCALP  |  Lots=0.01  Target=+$1.00  Stop=-$0.50
+=================================================================
+
+  [OPEN  #  1] BUY @ 101664.93  SL=101614.93  TP=101764.93  Lots=0.01  RSI=37.1  03:05
+  [✓WIN  #  1] BUY  Exit=101764.93  PnL=$+1.00  Bal=$101.00  03:11
+  [OPEN  #  2] BUY @ 101690.52  SL=101640.52  TP=101790.52  Lots=0.01  RSI=38.9  03:10
+  [✗LOSS #  2] BUY  Exit=101640.52  PnL=$-0.50  Bal=$100.50  03:24
+  [OPEN  #  3] BUY @ 101843.52  SL=101793.52  TP=101943.52  Lots=0.01  RSI=52.9  07:40
+  [✓WIN  #  3] BUY  Exit=101943.52  PnL=$+1.00  Bal=$101.50  07:50
+  [OPEN  #  4] SELL @ 101654.47  SL=101704.47  TP=101554.47  Lots=0.01  RSI=32.7  09:50
+  [✗LOSS #  4] SELL  Exit=101704.47  PnL=$-0.50  Bal=$101.00  09:57
+
+=================================================================
+  BACKTEST RESULTS — 5m  |  Tick data (40K ticks)
+=================================================================
+  Ticks     : 40,464   Candles: 187
+  Total     : 4 trades  (Wins: 2  Losses: 2)
+─────────────────────────────────────────────────────────────────
+  Win Rate  : 50.0%   ✗ Below 80%
+  Profit Fac: 2.00
+  Net P&L   : $+1.00  (+1.00%)
+  Max DD    : 0.50%
+  Avg Win   : $1.00   Avg Loss: $0.50   R:R 1:2.00
+  Balance   : $101.00
+=================================================================
+
+  Trade log   → /Users/manika/Desktop/MAOGAO/scraping-bots/backtest_trade_log.csv
+  (matplotlib not installed — skipping chart, pip3 install matplotlib)
+  HTML report → /Users/manika/Desktop/MAOGAO/scraping-bots/forex_backtest_report.html
+  Summary JSON → /Users/manika/Desktop/MAOGAO/scraping-bots/backtest_summary.json
+
+  ℹ️  Win rate 50.0% (Boost with: --tf 15 --tp 4 --sl 1.2)
+
