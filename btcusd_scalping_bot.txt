@@ -1,0 +1,392 @@
+//+------------------------------------------------------------------+
+//|                                   BTCUSD_ActiveScalpingBot.mq5   |
+//|                                                                   |
+//|                      AGGRESSIVE SCALPING - SIMPLIFIED            |
+//+------------------------------------------------------------------+
+#property copyright "BTCUSD Active Scalping Bot"
+#property version   "5.00"
+
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+
+//--- Input parameters - SIMPLIFIED FOR MORE TRADES
+input double ProfitTarget = 1.0;            // Target profit per trade ($1)
+input double StopLoss = 0.5;                // Stop loss ($0.50)
+input int MaxDailyTrades = 50;              // Many trades allowed
+input ENUM_TIMEFRAMES TimeFrame = PERIOD_M5; // 5-minute timeframe
+input int RSI_Period = 14;                  // Standard RSI
+input double RSI_BuyLevel = 45;             // Buy when RSI above this
+input double RSI_SellLevel = 55;            // Sell when RSI below this
+input int EMA_Period = 20;                  // Single EMA for trend
+input double MinLotSize = 0.01;             // Minimum lot size
+input bool EnableLogging = true;            // Detailed logging
+
+//--- Global variables
+string symbol = "BTCUSD";
+CTrade trade;
+CPositionInfo position;
+int totalTrades = 0;
+double totalProfit = 0;
+double dailyProfit = 0;
+datetime lastTradeTime = 0;
+datetime currentDay = 0;
+int rsiHandle;
+int emaHandle;
+bool inPosition = false;
+int dailyTradeCount = 0;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    Print("=== ACTIVE SCALPING BOT STARTED ===");
+    Print("Simple strategy: RSI + EMA with $", ProfitTarget, " target");
+    
+    // Select symbol
+    if(!SymbolSelect(symbol, true))
+    {
+        Print("ERROR: Cannot select ", symbol);
+        return INIT_FAILED;
+    }
+    
+    // Create indicators
+    rsiHandle = iRSI(symbol, TimeFrame, RSI_Period, PRICE_CLOSE);
+    emaHandle = iMA(symbol, TimeFrame, EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+    
+    if(rsiHandle == INVALID_HANDLE || emaHandle == INVALID_HANDLE)
+    {
+        Print("ERROR: Cannot create indicators");
+        return INIT_FAILED;
+    }
+    
+    // Setup trading
+    trade.SetExpertMagicNumber(123456);
+    trade.SetMarginMode();
+    trade.SetTypeFillingBySymbol(symbol);
+    trade.SetDeviationInPoints(20); // Allow slippage
+    
+    // Initialize day tracking
+    currentDay = TimeCurrent();
+    dailyTradeCount = 0;
+    
+    Print("Bot initialized successfully!");
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    Print("=== BOT STOPPED ===");
+    Print("Total trades: ", totalTrades);
+    Print("Total profit: $", totalProfit);
+    Print("Today's trades: ", dailyTradeCount);
+    Print("Today's profit: $", dailyProfit);
+    
+    if(rsiHandle != INVALID_HANDLE) IndicatorRelease(rsiHandle);
+    if(emaHandle != INVALID_HANDLE) IndicatorRelease(emaHandle);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    // Check for new day and reset counters
+    CheckNewDay();
+    
+    // Check if we have a position
+    CheckPosition();
+    
+    // Manage open position
+    if(inPosition)
+    {
+        ManagePosition();
+        return; // Don't open new trades while in position
+    }
+    
+    // Check if we can trade
+    if(dailyTradeCount >= MaxDailyTrades)
+    {
+        if(EnableLogging) Print("Daily trade limit reached: ", dailyTradeCount, "/", MaxDailyTrades);
+        return;
+    }
+    
+    // Wait at least 1 minute between trades
+    if(TimeCurrent() - lastTradeTime < 60)
+    {
+        return;
+    }
+    
+    // Look for trade opportunity
+    CheckForTrade();
+}
+
+//+------------------------------------------------------------------+
+//| Check for new day and reset counters                            |
+//+------------------------------------------------------------------+
+void CheckNewDay()
+{
+    datetime now = TimeCurrent();
+    MqlDateTime nowStruct, currentDayStruct;
+    
+    TimeToStruct(now, nowStruct);
+    TimeToStruct(currentDay, currentDayStruct);
+    
+    // Check if it's a new day
+    if(nowStruct.day != currentDayStruct.day || 
+       nowStruct.mon != currentDayStruct.mon ||
+       nowStruct.year != currentDayStruct.year)
+    {
+        Print("=== NEW TRADING DAY ===");
+        Print("Yesterday's trades: ", dailyTradeCount);
+        Print("Yesterday's profit: $", dailyProfit);
+        
+        // Reset daily counters
+        dailyTradeCount = 0;
+        dailyProfit = 0;
+        currentDay = now;
+        
+        Print("Daily counters reset. Ready for new trades!");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check current position status                                    |
+//+------------------------------------------------------------------+
+void CheckPosition()
+{
+    inPosition = false;
+    for(int i = 0; i < PositionsTotal(); i++)
+    {
+        if(position.SelectByIndex(i))
+        {
+            if(position.Symbol() == symbol && position.Magic() == 123456)
+            {
+                inPosition = true;
+                break;
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Manage open position                                             |
+//+------------------------------------------------------------------+
+void ManagePosition()
+{
+    if(!position.Select(symbol)) return;
+    
+    double profit = position.Profit();
+    
+    // Take profit
+    if(profit >= ProfitTarget)
+    {
+        if(EnableLogging) Print("Taking profit: $", profit);
+        ClosePosition();
+    }
+    // Stop loss
+    else if(profit <= -StopLoss)
+    {
+        if(EnableLogging) Print("Stop loss: $", profit);
+        ClosePosition();
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Close position                                                   |
+//+------------------------------------------------------------------+
+void ClosePosition()
+{
+    if(position.Select(symbol))
+    {
+        double profit = position.Profit();
+        
+        if(trade.PositionClose(position.Ticket()))
+        {
+            totalProfit += profit;
+            dailyProfit += profit;
+            Print("Position closed. Profit: $", profit, " | Daily: $", dailyProfit, " | Total: $", totalProfit);
+            inPosition = false;
+            lastTradeTime = TimeCurrent();
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check for trade opportunity                                      |
+//+------------------------------------------------------------------+
+void CheckForTrade()
+{
+    // Make sure we have enough bars
+    if(Bars(symbol, TimeFrame) < 100) return;
+    
+    // Get indicator values
+    double rsi = GetRSI();
+    double ema = GetEMA();
+    double currentPrice = SymbolInfoDouble(symbol, SYMBOL_BID);
+    
+    if(rsi == 0 || ema == 0) return; // Indicators not ready
+    
+    // Simple trading logic
+    bool buySignal = false;
+    bool sellSignal = false;
+    
+    // BUY: Price above EMA and RSI not overbought
+    if(currentPrice > ema && rsi > RSI_BuyLevel && rsi < 70)
+    {
+        buySignal = true;
+        if(EnableLogging) Print("BUY Signal: Price > EMA and RSI = ", rsi);
+    }
+    // SELL: Price below EMA and RSI not oversold
+    else if(currentPrice < ema && rsi < RSI_SellLevel && rsi > 30)
+    {
+        sellSignal = true;
+        if(EnableLogging) Print("SELL Signal: Price < EMA and RSI = ", rsi);
+    }
+    
+    // Execute trade
+    if(buySignal)
+    {
+        OpenTrade(true);
+    }
+    else if(sellSignal)
+    {
+        OpenTrade(false);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Open a trade                                                     |
+//+------------------------------------------------------------------+
+void OpenTrade(bool isBuy)
+{
+    double price = isBuy ? SymbolInfoDouble(symbol, SYMBOL_ASK) : SymbolInfoDouble(symbol, SYMBOL_BID);
+    double lotSize = CalculateLotSize();
+    
+    // Calculate SL and TP in points
+    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    double slPoints = (StopLoss / lotSize) / point;
+    double tpPoints = (ProfitTarget / lotSize) / point;
+    
+    // Minimum distance check
+    int minDistance = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    if(slPoints < minDistance) slPoints = minDistance + 10;
+    if(tpPoints < minDistance) tpPoints = minDistance + 20;
+    
+    double sl, tp;
+    
+    if(isBuy)
+    {
+        sl = price - slPoints * point;
+        tp = price + tpPoints * point;
+    }
+    else
+    {
+        sl = price + slPoints * point;
+        tp = price - tpPoints * point;
+    }
+    
+    // Place trade
+    bool success = false;
+    if(isBuy)
+    {
+        success = trade.Buy(lotSize, symbol, price, sl, tp, "Scalp Buy");
+    }
+    else
+    {
+        success = trade.Sell(lotSize, symbol, price, sl, tp, "Scalp Sell");
+    }
+    
+    if(success)
+    {
+        totalTrades++;
+        dailyTradeCount++;
+        lastTradeTime = TimeCurrent();
+        Print("=== TRADE PLACED #", totalTrades, " (Today: #", dailyTradeCount, ") ===");
+        Print("Type: ", isBuy ? "BUY" : "SELL");
+        Print("Price: ", price);
+        Print("Lot: ", lotSize);
+        Print("SL: ", sl, " (", slPoints, " points)");
+        Print("TP: ", tp, " (", tpPoints, " points)");
+        Print("Remaining trades today: ", MaxDailyTrades - dailyTradeCount);
+    }
+    else
+    {
+        Print("Trade failed! Error: ", GetLastError());
+        ResetLastError();
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate lot size                                               |
+//+------------------------------------------------------------------+
+double CalculateLotSize()
+{
+    // Get account info
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double minLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+    
+    // Simple lot calculation
+    double lotSize = MinLotSize;
+    
+    // Scale up with balance
+    if(balance > 500) lotSize = 0.02;
+    if(balance > 1000) lotSize = 0.03;
+    if(balance > 2000) lotSize = 0.05;
+    
+    // Normalize
+    lotSize = MathMax(lotSize, minLot);
+    lotSize = MathMin(lotSize, maxLot);
+    lotSize = NormalizeDouble(lotSize, 2);
+    
+    return lotSize;
+}
+
+//+------------------------------------------------------------------+
+//| Get RSI value                                                    |
+//+------------------------------------------------------------------+
+double GetRSI()
+{
+    double buffer[];
+    ArraySetAsSeries(buffer, true);
+    
+    if(CopyBuffer(rsiHandle, 0, 0, 3, buffer) < 3)
+        return 0;
+    
+    return buffer[0];
+}
+
+//+------------------------------------------------------------------+
+//| Get EMA value                                                    |
+//+------------------------------------------------------------------+
+double GetEMA()
+{
+    double buffer[];
+    ArraySetAsSeries(buffer, true);
+    
+    if(CopyBuffer(emaHandle, 0, 0, 3, buffer) < 3)
+        return 0;
+    
+    return buffer[0];
+}
+
+//+------------------------------------------------------------------+
+//| New bar check                                                    |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+    static datetime lastBar = 0;
+    datetime currentBar = iTime(symbol, TimeFrame, 0);
+    
+    if(currentBar != lastBar)
+    {
+        lastBar = currentBar;
+        return true;
+    }
+    return false;
+}
